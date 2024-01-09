@@ -104,22 +104,26 @@
 
         reader.onload = function(e) {
           console.log('Запускаю змея 🐍 и подгружаю библиотеки 📚')
-          main(e.target.result).then(() => {propagate(data, 'wilson.csv')});
+          main(new Uint8Array(e.target.result), file.name).then(() => {propagate(data, 'wilson.csv')});
         };
-        reader.readAsText(file);
+        reader.readAsArrayBuffer(file);
 
     }
-    async function main(result){
+    async function main(result, fname){
       const pyodide = await loadPyodide();
       await pyodide.loadPackage("pandas");
       await pyodide.loadPackage("scipy");
-      pyodide.FS.writeFile("/data.csv", result, { encoding: "utf8" });
+      await pyodide.loadPackage("micropip");
+      console.log('Installing openpyxl for xlsx format')
+      const micropip = pyodide.pyimport("micropip");
+      await micropip.install(['openpyxl']);
+      const globals = pyodide.toPy({ filename: fname, raw_data: result});
       pyodide.runPython(`
           import math
-          from io import StringIO
+          from io import BytesIO, StringIO
           import pandas as pd
           from scipy.stats import norm
-          print("high five")
+          print("Python is working. Gathering stats for wilson")
 
           def wilson(p: float, n: int) -> float:
               confidence = 0.90
@@ -128,7 +132,6 @@
               right = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
               bottom = 1 + z * z / n
               return (left - right) / bottom
-
 
           def normalize(score: int, n: int, v_min: int = 1, v_max: int = 5) -> float:
               """Normalize score from [v_min, v_max] to [0.0, 1.0]."""
@@ -139,17 +142,31 @@
               """Denormalize score from [0.0, 1.0] to [v_min, v_max]."""
               return score * (v_max - v_min) + v_min
 
-          print('Собираю статистику по Wilson')
-          ratings = pd.read_csv('/data.csv', sep=',').sort_values(by='Average rating', ascending=False).reset_index()
+          print('Собираю статистику для файла -', filename)
+          try:
+              buff = BytesIO(raw_data)
+          except Exception as exc:
+              print(exc)
+          try:
+            if filename.endswith('.xlsx'):
+                ratings = pd.read_excel(buff, engine='openpyxl')
+            else:
+                ratings = pd.read_csv(buff, sep=',')
+          except Exception:
+              import traceback
+              print(traceback.format_exception())
+              exit(0)
+
+          ratings = ratings.sort_values(by='Average rating', ascending=False).reset_index()
           del ratings['index']
 
           ratings['wilson'] = ratings.apply(lambda row: denormalize(wilson(normalize(row['Total scores'], row['Count']), row['Count'])), axis=1)
           ratings.sort_values(by='wilson', ascending=False)
 
-          ratings.to_csv('/data.csv', index=False)
+          ratings.to_csv('/wilson-stats.csv', index=False)
           print("Все кончилось. Погнали за чашкой ароматного ☕")
-          `);
-          data = pyodide.FS.readFile("/data.csv", { encoding: "utf8" })
+          `, { globals });
+          data = pyodide.FS.readFile("/wilson-stats.csv", { encoding: "utf8" })
         }
 
     function propagate(content, filename) {
